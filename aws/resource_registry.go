@@ -1,0 +1,209 @@
+package aws
+
+import (
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/gruntwork-io/cloud-nuke/aws/resources"
+)
+
+// GetAllRegisteredResources - returns a list of all registered resources without initialization.
+// This is useful for listing all resources without initializing them.
+func GetAllRegisteredResources() []*resources.AwsResource {
+	registeredResources := getRegisteredGlobalResources()
+	registeredResources = append(registeredResources, getRegisteredRegionalResources()...)
+
+	return toAwsResourcesPointer(registeredResources)
+}
+
+// GetAndInitRegisteredResources - returns a list of all registered resources with initialization.
+func GetAndInitRegisteredResources(session aws.Config, region string) []*resources.AwsResource {
+	var registeredResources []resources.AwsResource
+	if region == GlobalRegion {
+		registeredResources = getRegisteredGlobalResources()
+	} else {
+		registeredResources = getRegisteredRegionalResources()
+	}
+
+	return initRegisteredResources(toAwsResourcesPointer(registeredResources), session, region)
+}
+
+// GetRegisteredGlobalResources - returns a list of registered global resources.
+// Note: The order is important for IAM resources due to dependencies:
+// 1. Users (removes itself from groups, detaches its policies)
+// 2. Groups (removes remaining users, detaches its policies)
+// 3. Roles (deletes instance profiles, detaches policies)
+// 4. Service Linked Roles (special AWS-managed roles)
+// 5. Instance Profiles (any remaining standalone profiles)
+// 6. Policies (now fully detached from all entities)
+func getRegisteredGlobalResources() []resources.AwsResource {
+	return []resources.AwsResource{
+		resources.NewCloudfrontDistributions(),
+		resources.NewDBGlobalClusters(),
+		// IAM deletion order: Users -> Groups -> Roles -> ServiceLinkedRoles -> InstanceProfiles -> Policies
+		resources.NewIAMUsers(),
+		resources.NewIAMGroups(),
+		resources.NewIAMRoles(),
+		resources.NewIAMServiceLinkedRoles(),
+		resources.NewIAMInstanceProfiles(),
+		resources.NewIAMPolicies(),
+		resources.NewOIDCProviders(),
+		resources.NewRoute53HostedZone(),
+		resources.NewRoute53CidrCollections(),
+		resources.NewRoute53TrafficPolicies(),
+		resources.NewS3MultiRegionAccessPoints(),
+		resources.NewS3Buckets(),
+	}
+}
+
+func getRegisteredRegionalResources() []resources.AwsResource {
+	// Note: The order is important because it determines the order of nuking resources. Some resources need to
+	// be deleted before others (Dependencies between resources exist). For example, we want to delete all EC2
+	// instances before deleting the VPC.
+	return []resources.AwsResource{
+		resources.NewAccessAnalyzer(),
+		resources.NewACM(),
+		resources.NewACMPCA(),
+		resources.NewAMIs(),
+		resources.NewApiGateway(),
+		resources.NewApiGatewayV2(),
+		resources.NewASGroups(),
+		resources.NewAppRunnerService(),
+		resources.NewBackupPlan(),
+		resources.NewBackupVault(),
+		resources.NewManagedPrometheus(),
+		resources.NewGrafana(),
+		resources.NewEventBridgeSchedule(),
+		resources.NewEventBridgeScheduleGroup(),
+		resources.NewEventBridgeArchive(),
+		resources.NewEventBridgeRule(),
+		resources.NewEventBridge(),
+		resources.NewCloudtrailTrail(),
+		resources.NewCloudFormationStacks(),
+		resources.NewCloudWatchAlarms(),
+		resources.NewCloudWatchDashboards(),
+		resources.NewCloudWatchLogGroups(),
+		resources.NewCloudMapServices(),
+		resources.NewCloudMapNamespaces(),
+		resources.NewCodeDeployApplications(),
+		resources.NewConfigServiceRecorders(),
+		resources.NewConfigServiceRules(),
+		resources.NewDataPipeline(),
+		resources.NewDataSyncTask(),
+		resources.NewDataSyncLocation(),
+		resources.NewDynamoDB(),
+		resources.NewEBSVolumes(),
+		resources.NewEBApplications(),
+		resources.NewEC2Instances(),
+		resources.NewEC2DedicatedHosts(),
+		resources.NewEC2KeyPairs(),
+		resources.NewEC2PlacementGroups(),
+		resources.NewTransitGateways(),
+		resources.NewTransitGatewaysRouteTables(),
+		// Note: nuking transitgateway vpc attachement before nuking the vpc since vpc could be associated with it.
+		resources.NewTransitGatewayPeeringAttachment(),
+		resources.NewTransitGatewaysVpcAttachment(),
+		resources.NewVPCPeeringConnection(),
+		resources.NewEC2Endpoints(),
+		resources.NewECR(),
+		resources.NewECSClusters(),
+		resources.NewECSServices(),
+		resources.NewEgressOnlyInternetGateway(),
+		resources.NewElasticFileSystem(),
+		resources.NewEIPAddresses(),
+		resources.NewEKSClusters(),
+		resources.NewElasticCacheServerless(),
+		resources.NewElasticaches(),
+		resources.NewElasticacheParameterGroups(),
+		resources.NewElasticacheSubnetGroups(),
+		resources.NewLoadBalancers(),
+		resources.NewLoadBalancersV2(),
+		resources.NewGuardDuty(),
+		resources.NewKinesisFirehose(),
+		resources.NewKinesisStreams(),
+		resources.NewKmsCustomerKeys(),
+		resources.NewLambdaFunctions(),
+		resources.NewLambdaLayers(),
+		resources.NewLaunchConfigs(),
+		resources.NewLaunchTemplates(),
+		resources.NewMacieMember(),
+		resources.NewMSKCluster(),
+		resources.NewMQBroker(),
+		resources.NewNatGateways(),
+		resources.NewOpenSearchDomains(),
+		resources.NewDBGlobalClusterMemberships(),
+		resources.NewDBInstances(),
+		resources.NewDBSubnetGroups(),
+		resources.NewDBClusters(),
+		resources.NewRdsProxy(),
+		resources.NewRdsSnapshot(),
+		resources.NewRdsClusterSnapshot(),
+		resources.NewRdsParameterGroup(),
+		resources.NewRedshiftClusters(),
+		resources.NewRedshiftSnapshotCopyGrants(),
+		resources.NewResourceShares(),
+		resources.NewS3AccessPoints(),
+		resources.NewS3ObjectLambdaAccessPoints(),
+		resources.NewSageMakerNotebookInstances(),
+		resources.NewSageMakerStudio(),
+		resources.NewSageMakerEndpoint(),
+		resources.NewSageMakerEndpointConfig(),
+		resources.NewSecretsManagerSecrets(),
+		resources.NewSSMParameter(),
+		resources.NewSecurityHub(),
+		resources.NewSesConfigurationSet(),
+		resources.NewSesEmailTemplates(),
+		resources.NewSesIdentities(),
+		resources.NewSesReceiptRule(),
+		resources.NewSesReceiptFilter(),
+		resources.NewSnapshots(),
+		resources.NewSNSTopic(),
+		resources.NewSqsQueue(),
+		resources.NewEC2IPAM(),
+		resources.NewEC2IPAMScope(),
+		resources.NewEC2IPAMResourceDiscovery(),
+		resources.NewEC2IPAMPool(),
+		resources.NewEC2IPAMByoasn(),
+		resources.NewEC2IPAMCustomAllocation(),
+		resources.NewNetworkFirewalls(),
+		resources.NewNetworkFirewallPolicy(),
+		resources.NewNetworkFirewallRuleGroup(),
+		resources.NewNetworkFirewallTLSConfig(),
+		resources.NewNetworkFirewallResourcePolicy(),
+		resources.NewVPCLatticeServiceNetwork(),
+		resources.NewVPCLatticeService(),
+		resources.NewVPCLatticeTargetGroup(),
+		// Note: VPC deletion order per AWS docs (https://docs.aws.amazon.com/vpc/latest/userguide/delete-vpc.html):
+		// 1. Route Tables (custom route tables must be disassociated and deleted before subnets/VPC)
+		resources.NewRouteTable(),
+		// 2. Network Interfaces (ENIs must be deleted before security groups and subnets)
+		resources.NewNetworkInterface(),
+		// 3. Security Groups (must be deleted before VPC, after ENIs that reference them)
+		resources.NewSecurityGroup(),
+		// 4. Network ACLs (must be deleted before subnets)
+		resources.NewNetworkACL(),
+		// 5. Subnets (after ENIs, security groups, network ACLs)
+		resources.NewEC2Subnet(),
+		// 6. Internet Gateways (detach and delete before VPC)
+		resources.NewInternetGateway(),
+		// 7. VPCs (must be deleted last after all VPC-dependent resources)
+		resources.NewEC2VPC(),
+		// 8. DHCP Options (can be deleted after VPC since they're just disassociated)
+		resources.NewEC2DhcpOptions(),
+	}
+}
+
+func toAwsResourcesPointer(res []resources.AwsResource) []*resources.AwsResource {
+	var awsResourcePointers []*resources.AwsResource
+	for i := range res {
+		awsResourcePointers = append(awsResourcePointers, &res[i])
+	}
+
+	return awsResourcePointers
+}
+
+func initRegisteredResources(res []*resources.AwsResource, session aws.Config, region string) []*resources.AwsResource {
+	for _, r := range res {
+		(*r).Init(session)
+	}
+
+	return res
+}

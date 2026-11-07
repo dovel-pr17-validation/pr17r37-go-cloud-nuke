@@ -1,0 +1,121 @@
+# CLI Usage
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `cloud-nuke aws` | Delete all resources (with confirmation prompt) |
+| `cloud-nuke inspect-aws` | Inspect resources without deleting |
+| `cloud-nuke defaults-aws` | Delete default VPCs and default security group rules |
+| `cloud-nuke azure` | Delete Azure resources (with confirmation prompt) |
+| `cloud-nuke inspect-azure` | Inspect Azure resources without deleting |
+| `cloud-nuke gcp` | Delete GCP resources (with confirmation prompt) |
+| `cloud-nuke inspect-gcp` | Inspect GCP resources without deleting |
+
+## Flags
+
+### Filtering
+
+| Flag | Description | Available in |
+|---|---|---|
+| `--region` | Target specific regions (repeatable). On GCP this names locations, which filter what each resource keeps, and `global` is not one of them. A multi-region or dual-region GCS bucket answers to its own location, `US` or `NAM4`, not to a region inside it. On Azure this names locations, typed the way the portal shows them or the way the API reports them | aws, inspect-aws, defaults-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--exclude-region` | Exclude regions (repeatable, mutually exclusive with `--region` on AWS). On GCP this excludes locations, and a resource type with no location is still deleted. On Azure this excludes locations | aws, inspect-aws, defaults-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--resource-type` | Target specific resource types (repeatable) | aws, inspect-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--exclude-resource-type` | Exclude resource types (repeatable, mutually exclusive with `--resource-type`) | aws, inspect-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--older-than` | Only target resources older than duration ([Go duration](https://golang.org/pkg/time/#ParseDuration)) | aws, inspect-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--newer-than` | Only target resources newer than duration | aws, inspect-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--config` | Path to [config file](configuration.md) for granular filtering | aws, gcp, azure |
+| `--exclude-first-seen` | Exclude resources based on first-seen tag | aws, inspect-aws |
+
+### Execution
+
+| Flag | Description | Available in |
+|---|---|---|
+| `--dry-run` | Preview deletions without executing | aws, gcp, azure |
+| `--force` | Skip confirmation prompt | aws, gcp, azure, defaults-aws |
+| `--timeout` | Set execution timeout (e.g., `10m`). On Azure this is a deadline over the whole run | aws, gcp, azure |
+| `--sg-only` | Only delete default security group rules, not VPCs | defaults-aws |
+
+### Output
+
+| Flag | Description | Available in |
+|---|---|---|
+| `--log-level` | Log verbosity: `debug`, `info` (default), `warn`, `error`, `panic`, `fatal`, `trace`. Also settable via `LOG_LEVEL` env var. | all |
+| `--output-format` | Output format: `table` (default), `json` | aws, inspect-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--output-file` | Write output to file instead of stdout | aws, inspect-aws, gcp, inspect-gcp, azure, inspect-azure |
+| `--list-resource-types` | List all supported resource type identifiers | aws, inspect-aws, gcp, inspect-gcp, azure, inspect-azure |
+
+### KMS
+
+| Flag | Description | Available in |
+|---|---|---|
+| `--delete-unaliased-kms-keys` | Delete KMS keys without aliases | aws |
+| `--list-unaliased-kms-keys` | List KMS keys without aliases | inspect-aws |
+
+### Azure
+
+| Flag | Description | Available in |
+|---|---|---|
+| `--subscription-id` | Azure subscription ID (required, repeatable) | azure, inspect-azure |
+| `--region` | Target specific locations (repeatable) | azure, inspect-azure |
+| `--exclude-region` | Exclude locations (repeatable) | azure, inspect-azure |
+
+Azure authenticates through the default credential chain, so `az login`, a service principal in the environment, or a managed identity all work. A location may be typed the way the portal shows it, `West Europe`, or the way the API reports it, `westeurope`.
+
+Azure does not report when a resource group was created, so a run that passes `--older-than` or `--newer-than` deletes none of them and says how many it left alone. Drop the time filter to include them.
+
+A resource group another service manages, or one a `CanNotDelete` or `ReadOnly` lock covers, is left alone: Azure refuses those deletes. A lock on the subscription covers every group in it. Reading locks needs `Microsoft.Authorization/locks/read`, and without it the scan carries on and a locked group reports the delete error instead.
+
+Deleting a resource group deletes everything inside it, wherever those resources live, so a run narrowed by `--region` can still remove a resource in another location. The run says so when a location filter is set.
+
+### GCP
+
+| Flag | Description | Available in |
+|---|---|---|
+| `--project-id` | GCP project ID (required) | gcp, inspect-gcp |
+
+A resource type that is in no location, such as a Pub/Sub topic, cannot be narrowed by `--region`, so a run that passes one leaves that type out and says so in a warning. Drop `--region` to include it. A run whose every `--resource-type` is in no location is refused, since it could only delete nothing. `--exclude-region` is not a narrowing, so those types are still deleted under it.
+
+The report's region column, and the `region` key in its JSON, carry the project id on GCP where they used to carry `global`, so a script selecting GCP rows by that word finds none.
+
+## Examples
+
+```bash
+# Nuke everything in specific regions
+cloud-nuke aws --region us-east-1 --region us-west-2
+
+# Nuke only EC2 and S3, skip confirmation
+cloud-nuke aws --resource-type ec2 --resource-type s3 --force
+
+# Dry run with config file
+cloud-nuke aws --dry-run --config path/to/config.yaml
+
+# Inspect with specific AWS profile
+AWS_PROFILE=dev cloud-nuke inspect-aws --region us-east-1
+
+# Nuke only default security group rules
+cloud-nuke defaults-aws --sg-only
+
+# JSON output to file
+cloud-nuke inspect-aws --output-format json --output-file results.json
+
+# Nuke GCP resources
+cloud-nuke gcp --project-id my-project-id --resource-type gcs-bucket
+
+# Nuke Azure resources in one subscription, in one location
+cloud-nuke azure --subscription-id 00000000-0000-0000-0000-000000000000 --region westeurope
+```
+
+> CLI flags override config file options. If you pass `--resource-type s3` but your config only defines rules for `ec2`, only s3 is targeted.
+
+## Protect Resources with `cloud-nuke-after` Tag
+
+Tag resources with `cloud-nuke-after` and an ISO 8601 date (e.g., `2024-07-09T00:00:00Z`) to protect them from deletion until that date.
+
+## Note on Nuking VPCs
+
+Cloud-nuke automatically removes VPC dependencies: Internet Gateways, Egress Only Internet Gateways, ENIs, VPC Endpoints, Subnets, Route Tables, Network ACLs, Security Groups, and DHCP Option Sets (dissociated only). Elastic IPs are cleaned up as a separate resource first.
+
+All other VPC sub-resources must be cleaned up before nuking VPCs.
+
+> VPC cleanup may not fully complete on the first run due to AWS eventual consistency. If you see `InvalidParameterValue: Network interface is currently in use.`, wait 30 minutes and retry.

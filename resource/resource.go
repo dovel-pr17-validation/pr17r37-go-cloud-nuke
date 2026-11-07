@@ -1,0 +1,263 @@
+package resource
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/gruntwork-io/cloud-nuke/config"
+	"github.com/gruntwork-io/cloud-nuke/logging"
+	"github.com/gruntwork-io/cloud-nuke/util"
+	"github.com/gruntwork-io/go-commons/errors"
+	"github.com/hashicorp/go-multierror"
+)
+
+// DefaultBatchSize is the maximum number of resources per batch
+const DefaultBatchSize = 50
+
+// Scope is where one resource lives, as its own cloud names that place. A
+// resource reads it to build the request its API expects, and the engine reads
+// its String for the logs and the errors.
+//
+// For AWS: Region is set, such as "us-east-1", or "global" for a global resource.
+// For GCP: ProjectID is set, and Region when the resource is regional.
+// For Azure: Subscription is set.
+type Scope struct {
+	Region       string // AWS region, or "global" for a global resource
+	ProjectID    string // GCP project id
+	Subscription string // Azure subscription id
+}
+
+// String returns a human-readable representation of the scope for logging
+func (s Scope) String() string {
+	if s.Subscription != "" {
+		return s.Subscription
+	}
+	if s.ProjectID != "" {
+		if s.Region != "" {
+			return s.ProjectID + "/" + s.Region
+		}
+		return s.ProjectID
+	}
+	return s.Region
+}
+
+// NukeableResource defines the common interface for all cloud resources that can be nuked.
+// This is embedded by provider-specific interfaces (AwsResource, GcpResource) which add
+// their own Init method with provider-specific config types.
+type NukeableResource interface {
+	ResourceName() string
+	ResourceIdentifiers() []string
+	MaxBatchSize() int
+	Nuke(ctx context.Context, identifiers []string) ([]NukeResult, error)
+	GetAndSetIdentifiers(ctx context.Context, configObj config.Config) ([]string, error)
+	IsNukable(string) (bool, error)
+	GetAndSetResourceConfig(config.Config) config.ResourceType
+}
+
+// Resource is the universal struct for all nukeable resources.
+// C is the cloud service client type (e.g., *ec2.Client, *storage.Client).
+//
+// This single struct contains:
+// - Configuration: what kind of resource this is and how to interact with it
+// - Runtime state: client, scope, discovered identifiers, nukable status
+//
+// Usage: Create with struct literal, then call Init() before other methods.
+type Resource[C any] struct {
+	// === Configuration (set at construction time) ===
+
+	// ResourceTypeName is the unique identifier (e.g., "ec2-keypairs", "gcs-bucket")
+	ResourceTypeName string
+
+	// BatchSize is the maximum number of resources to delete per batch.
+	// If 0, defaults to DefaultBatchSize (50).
+	// Set based on AWS/GCP API rate limits for this resource type.
+	BatchSize int
+
+	// InitClient initializes the client from cloud-specific config.
+	// For AWS: cfg is aws.Config
+	// For GCP: cfg is resources.GcpConfig
+	// Set r.Client and r.Scope directly in this function.
+	InitClient func(r *Resource[C], cfg any)
+
+	// ConfigGetter retrieves the resource-specific config section
+	ConfigGetter func(c config.Config) config.ResourceType
+
+	// Lister retrieves all resource identifiers to nuke.
+	// Receives the resource-specific config (extracted via ConfigGetter).
+	Lister func(ctx context.Context, client C, scope Scope, resourceCfg config.ResourceType) ([]*string, error)
+
+	// Nuker deletes the resources. Use SimpleBatchDeleter, SequentialDeleter, or MultiStepDeleter.
+	Nuker NukerFunc[C]
+
+	// PermissionVerifier performs optional dry-run permission checks (nil = skip verification)
+	PermissionVerifier func(ctx context.Context, client C, id *string) error
+
+	// === Runtime state (set during execution) ===
+
+	// Client is the typed cloud service client
+	Client C
+
+	// InitializationError stores any error that occurred during InitClient
+	InitializationError error
+
+	// Scope contains Region (AWS) and/or ProjectID (GCP)
+	Scope Scope
+
+	// identifiers holds the discovered resource IDs
+	identifiers []string
+
+	// nukables tracks which resources can be nuked (nil value = nukable)
+	nukables map[string]error
+}
+
+// Init initializes the resource with cloud-specific configuration.
+// For AWS: cfg should be aws.Config
+// For GCP: cfg should be resources.GcpConfig
+// Must be called before GetAndSetIdentifiers or Nuke.
+func (r *Resource[C]) Init(cfg any) {
+	r.nukables = make(map[string]error)
+	if r.InitClient != nil {
+		r.InitClient(r, cfg)
+	}
+}
+
+// ResourceName returns the unique resource type name (implements AwsResource/GcpResource interface)
+func (r *Resource[C]) ResourceName() string {
+	return r.ResourceTypeName
+}
+
+// ResourceIdentifiers returns the currently stored identifiers (implements AwsResource/GcpResource interface)
+func (r *Resource[C]) ResourceIdentifiers() []string {
+	return r.identifiers
+}
+
+// MaxBatchSize returns the batch size for this resource (implements AwsResource/GcpResource interface)
+func (r *Resource[C]) MaxBatchSize() int {
+	if r.BatchSize > 0 {
+		return r.BatchSize
+	}
+	return DefaultBatchSize
+}
+
+// GetAndSetResourceConfig retrieves the resource-specific configuration (implements AwsResource/GcpResource interface)
+func (r *Resource[C]) GetAndSetResourceConfig(configObj config.Config) config.ResourceType {
+	if r.ConfigGetter == nil {
+		return config.ResourceType{}
+	}
+	return r.ConfigGetter(configObj)
+}
+
+// GetAndSetIdentifiers discovers resources and stores their identifiers (implements AwsResource/GcpResource interface)
+func (r *Resource[C]) GetAndSetIdentifiers(ctx context.Context, configObj config.Config) ([]string, error) {
+	if r.Lister == nil {
+		return nil, fmt.Errorf("%s: Lister function not configured", r.ResourceTypeName)
+	}
+
+	// Extract resource-specific config and pass to Lister
+	if r.ConfigGetter == nil {
+		return nil, fmt.Errorf("%s: ConfigGetter function not configured", r.ResourceTypeName)
+	}
+
+	// If an error occurred during initialization (e.g. API disabled), return it here
+	if r.InitializationError != nil {
+		return nil, r.InitializationError
+	}
+
+	resourceCfg := r.ConfigGetter(configObj)
+	identifiers, err := r.Lister(ctx, r.Client, r.Scope, resourceCfg)
+	if err != nil {
+		return nil, fmt.Errorf("%s: failed to list resources in %s: %w", r.ResourceTypeName, r.Scope, err)
+	}
+
+	// Run permission verification if configured
+	if r.PermissionVerifier != nil {
+		r.verifyNukablePermissions(identifiers, func(id *string) error {
+			return r.PermissionVerifier(ctx, r.Client, id)
+		})
+	}
+
+	r.identifiers = util.DerefStringSlice(identifiers)
+	return r.identifiers, nil
+}
+
+// Nuke deletes the resources with the given identifiers (implements AwsResource/GcpResource interface)
+// Returns the results of each deletion attempt. The caller is responsible for reporting.
+func (r *Resource[C]) Nuke(ctx context.Context, identifiers []string) ([]NukeResult, error) {
+	if len(identifiers) == 0 {
+		return nil, nil
+	}
+
+	if r.InitializationError != nil {
+		return nil, r.InitializationError
+	}
+
+	if r.Nuker == nil {
+		return nil, fmt.Errorf("%s: Nuker function not configured", r.ResourceTypeName)
+	}
+
+	ptrIdentifiers := util.ToStringPtrSlice(identifiers)
+	results := r.Nuker(ctx, r.Client, r.Scope, r.ResourceTypeName, ptrIdentifiers)
+
+	// Aggregate errors and log results (logging stays here, it's not reporting)
+	var allErrs *multierror.Error
+	for _, result := range results {
+		if result.Error != nil {
+			if util.IsWarningError(result.Error) {
+				logging.Warnf("[Warning] %s %s: %s (non-fatal, will retry next run)",
+					r.ResourceTypeName, result.Identifier, result.Error)
+			} else {
+				logging.Errorf("[Failed] %s %s: %s", r.ResourceTypeName, result.Identifier, result.Error)
+				allErrs = multierror.Append(allErrs, fmt.Errorf("%s: %w", result.Identifier, result.Error))
+			}
+		} else {
+			logging.Debugf("[OK] Deleted %s: %s", r.ResourceTypeName, result.Identifier)
+		}
+	}
+
+	return results, errors.WithStackTrace(allErrs.ErrorOrNil())
+}
+
+// IsNukable checks if a resource can be nuked (implements AwsResource/GcpResource interface).
+// Returns (true, nil) if nukable, (false, error) if not.
+// If the identifier was never verified, returns (true, nil) - assuming nukable by default.
+func (r *Resource[C]) IsNukable(id string) (bool, error) {
+	err, ok := r.nukables[id]
+	if !ok {
+		// Not in the map - for resources without permission verification,
+		// this is the normal case. Return nukable.
+		return true, nil
+	}
+	if err != nil {
+		// Explicitly marked as not nukable
+		return false, err
+	}
+	// Explicitly marked as nukable (verified with nil error)
+	return true, nil
+}
+
+// setNukableStatus sets the nukable status for an identifier
+func (r *Resource[C]) setNukableStatus(id string, err error) {
+	if r.nukables == nil {
+		r.nukables = make(map[string]error)
+	}
+	r.nukables[id] = err
+}
+
+// verifyNukablePermissions checks permissions for each ID using the provided check function
+func (r *Resource[C]) verifyNukablePermissions(ids []*string, checkFn func(id *string) error) {
+	if r.nukables == nil {
+		r.nukables = make(map[string]error)
+	}
+	for _, id := range ids {
+		if id == nil {
+			continue
+		}
+		idStr := *id
+		// Skip if already verified
+		if _, exists := r.nukables[idStr]; exists {
+			continue
+		}
+		err := checkFn(id)
+		r.setNukableStatus(idStr, err)
+	}
+}

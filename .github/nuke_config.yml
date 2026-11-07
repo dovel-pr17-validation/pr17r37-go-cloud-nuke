@@ -1,0 +1,229 @@
+# This config uses exclude (blocklist) rules so cloud-nuke deletes everything by default,
+# and only explicitly protected infrastructure resources are preserved.
+S3:
+  exclude:
+    names_regex:
+      # Terraform/Terragrunt state and logs
+      - "^gruntwork-.*-tf-state$"
+      - "^gruntwork-.*-tf-logs$"
+      - "^gruntwork-.*-terraform-state.*"
+      - "^gruntwork-stem-terraform-state-bucket$"
+      - "^gruntwork-phxdevops-tfstate$"
+      - "^terragrunt-example-tf-state-.*"
+      - "^terragrunt-catalog-example-tfstate$"
+      - "^gw-terragrunt-catalog-example-tfstate$"
+      - "^acme-main-terraform-state$"
+      - "^tfe-v2-states-.*"
+      # Operational
+      - "^config-bucket-087285199408$"
+      - "^phxdevops-.*"
+      - "^aws-athena-query-results-087285199408-.*"
+      # Websites and branding
+      - "^www\\.phoenixdevops\\.com$"
+      - "^gruntwork\\.org$"
+      - "^gruntworks\\.io$"
+      # Elastic Beanstalk (regional, auto-created)
+      - "^elasticbeanstalk-.*-087285199408$"
+      # Shared infra
+      - "^gruntwork-dev-.*"
+      - "^gruntwork-houston-.*"
+      - "^gruntwork-iac-training$"
+      - "^gruntwork-sandbox-bucket$"
+      - "^gruntwork-github-.*"
+      - "^gruntwork-ref-arch-lite-.*"
+      - "^example-corp-assets$"
+      - "^redis-copy-snapshot-example-.*"
+
+SecretsManager:
+  exclude:
+    names_regex:
+      - "^cost-anomaly-alerts/.*"
+
+NATGateway:
+  exclude:
+    names_regex:
+      # We have an active ECS Deploy Runner running in the sandbox environment for sales demos, and this NAT gateway is
+      # critical for that.
+      - "^ecs-deploy-runner-v2-nat-gateway-0$"
+
+OIDCProvider:
+  exclude:
+    names_regex:
+      # We have an active OIDC Provider used by github actions
+      - "^token.actions.githubusercontent.com$"
+
+CloudWatchLogGroup:
+  exclude:
+    names_regex:
+      - "^/aws/lambda/cost-anomaly-alerts-to-slack$"
+      - "^/aws/lambda/ecs-deploy-runner-invoker$"
+      # AWS Control Tower managed log group (SCP denies deletion)
+      - "^/aws/lambda/aws-controltower-"
+
+IAMUsers:
+  exclude:
+    names_regex:
+      # We want to make sure the main circle-ci-test user is never deleted
+      - "^circle-ci-test$"
+
+IAMGroups:
+  # IAM groups do not support tags, so the per-repo CircleCI cleanup jobs (which
+  # filter by the gw:repo tag) skip them and they leak until the account hits the
+  # GroupsPerAccount quota (OSS-4024). They are cleaned up here instead.
+  #
+  # Unlike the other resource types in this file, this is an allowlist rather than
+  # a blocklist: only groups matching a known test naming convention are deleted,
+  # so any real group is protected by default. Broaden this list as other repos'
+  # test group names are confirmed.
+  include:
+    names_regex:
+      # terraform-aws-security: "<uniqueId>-test-group-number-N", "test-group-<id>"
+      - "test-group"
+
+IAMRoles:
+  exclude:
+    names_regex:
+      # GitHub OIDC and CI
+      - "^github$"
+      - "^github-read-only$"
+      - "^cloud-nuke-gha$"
+      # Cost alerting
+      - "^cost-anomaly-alerts-to-slack$"
+      # CI/CD and deployment
+      - "^_circle-ci-.*"
+      - "^pipelines-policy-update-.*"
+      - "^root-pipelines-.*"
+      - "^terragrunt-circleci-assume-role$"
+      # SSO
+      - "^AWSReservedSSO_.*"
+      # Cross-account access
+      - "^allow-full-access-from-other-accounts$"
+      - ".*-from-saml-.*"
+      # AWS Systems Manager QuickSetup
+      - "^AWS-QuickSetup-.*"
+      # Infrastructure
+      - "^dlm-lifecycle-role$"
+      - "^eks-fargate-execution-role$"
+      - "^AWSBackupDefaultServiceRole$"
+      - "^tailscale-.*"
+
+IAMPolicies:
+  exclude:
+    names_regex:
+      # Account-level policies
+      - "^_phxdevops-.*"
+      # CI policies
+      - "^ci\\..*"
+      - "^aeloir\\.ci\\..*"
+      # ECS Deploy Runner / production
+      - "^ecs-prod-.*"
+      - "^ecs-stage-.*"
+      - "^edr-.*"
+      # Cost alerting (auto-generated logging policy from terraform-aws-lambda)
+      - "^cost-anomaly-alerts-to-slack-logging.*"
+      # Service policies
+      - "^AWSConfigSNSPublishPolicy$"
+      - "^AmazonEKSFullAccess$"
+      - "^CloudFormationFullAccess$"
+      - "^AccessAnalyzerMonitorServicePolicy.*"
+
+KMSCustomerKeys:
+  exclude:
+    names_regex:
+      # Shared test key referenced by multiple repos (terragrunt, terraform-aws-security, terraform-aws-eks, etc.)
+      # Either "^alias/dedicated-test-key$" or "^dedicated-test-key$" matches. The prefixed
+      # form is spelled out here so the exclusion holds regardless of cloud-nuke version.
+      - "^alias/dedicated-test-key$"
+
+VPC:
+  exclude:
+    names_regex:
+      - "^mgmt"
+
+ECSCluster:
+  exclude:
+    names_regex:
+      - "^ecs-deploy-runner"
+
+SNS:
+  exclude:
+    names_regex:
+      - "^cost-anomaly-alerts$"
+      # AWS Control Tower managed topic (SCP denies deletion)
+      - "aws-controltower-"
+
+LambdaFunction:
+  exclude:
+    names_regex:
+      - "^ecs-deploy-runner-invoker"
+      - "^cost-anomaly-alerts-to-slack$"
+      # AWS Control Tower managed function (SCP denies deletion)
+      - "^aws-controltower-"
+
+ACM:
+  exclude:
+    names_regex:
+      - ".*gruntwork.in"
+      - ".*gruntwork-dev.io"
+
+DBSubnetGroups:
+  exclude:
+    names_regex:
+      - "gruntwork-test-db-subnet-group"
+
+RDSParameterGroup:
+  exclude:
+    names_regex:
+      - "gruntwork-test-.*"
+
+MSKCluster:
+  # Delete all MSK clusters - none are infrastructure
+
+InternetGateway:
+  exclude:
+    names_regex:
+      # Exclude any IGW with gruntwork or gw- prefix to protect infrastructure resources
+      - "^gruntwork.*"
+      - "^gw-.*"
+
+BackupVault:
+  exclude:
+    names_regex:
+      # AWS-managed EFS automatic backup vault (resource policy explicitly denies deletion)
+      - "^aws/efs/automatic-backup-vault$"
+
+BackupPlan:
+  exclude:
+    names_regex:
+      # AWS-managed EFS automatic backup plan (service-managed; DeleteBackupSelection returns 403)
+      - "^aws/efs/.*"
+
+CloudTrailTrail:
+  exclude:
+    names_regex:
+      # AWS Control Tower managed trail (cross-account, cannot be deleted)
+      - "^aws-controltower-BaselineCloudTrail$"
+
+EventBridge:
+  exclude:
+    names_regex:
+      # AWS Control Tower managed rule (SCP denies deletion)
+      - "aws-controltower-"
+
+EventBridgeRule:
+  exclude:
+    names_regex:
+      # AWS Control Tower managed rule (SCP denies deletion)
+      - "aws-controltower-"
+
+ConfigServiceRecorder:
+  exclude:
+    names_regex:
+      # AWS Control Tower managed recorder (SCP denies deletion)
+      - "^aws-controltower-"
+
+Route53HostedZone:
+  exclude:
+    names_regex:
+      - ".*gruntwork\\.in\\.?$"
+      - ".*gruntwork-dev\\.io\\.?$"

@@ -1,0 +1,7 @@
+S3:
+  include:
+    - .*
+S3:
+  include:
+    tags:
+      - .*

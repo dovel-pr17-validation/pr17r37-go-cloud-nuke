@@ -1,0 +1,197 @@
+package resources
+
+import (
+	"context"
+	"regexp"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/gruntwork-io/cloud-nuke/config"
+	"github.com/gruntwork-io/cloud-nuke/resource"
+	"github.com/gruntwork-io/cloud-nuke/util"
+	"github.com/stretchr/testify/require"
+)
+
+type mockEC2IPAMClient struct {
+	DescribeIpamsOutput             ec2.DescribeIpamsOutput
+	DeleteIpamOutput                ec2.DeleteIpamOutput
+	GetIpamPoolCidrsOutput          ec2.GetIpamPoolCidrsOutput
+	DeprovisionIpamPoolCidrOutput   ec2.DeprovisionIpamPoolCidrOutput
+	GetIpamPoolAllocationsOutput    ec2.GetIpamPoolAllocationsOutput
+	ReleaseIpamPoolAllocationOutput ec2.ReleaseIpamPoolAllocationOutput
+	DescribeIpamScopesOutput        ec2.DescribeIpamScopesOutput
+	DescribeIpamPoolsOutput         ec2.DescribeIpamPoolsOutput
+	DeleteIpamPoolOutput            ec2.DeleteIpamPoolOutput
+}
+
+func (m *mockEC2IPAMClient) DescribeIpams(ctx context.Context, params *ec2.DescribeIpamsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeIpamsOutput, error) {
+	return &m.DescribeIpamsOutput, nil
+}
+
+func (m *mockEC2IPAMClient) DeleteIpam(ctx context.Context, params *ec2.DeleteIpamInput, optFns ...func(*ec2.Options)) (*ec2.DeleteIpamOutput, error) {
+	return &m.DeleteIpamOutput, nil
+}
+
+func (m *mockEC2IPAMClient) GetIpamPoolCidrs(ctx context.Context, params *ec2.GetIpamPoolCidrsInput, optFns ...func(*ec2.Options)) (*ec2.GetIpamPoolCidrsOutput, error) {
+	return &m.GetIpamPoolCidrsOutput, nil
+}
+
+func (m *mockEC2IPAMClient) DeprovisionIpamPoolCidr(ctx context.Context, params *ec2.DeprovisionIpamPoolCidrInput, optFns ...func(*ec2.Options)) (*ec2.DeprovisionIpamPoolCidrOutput, error) {
+	return &m.DeprovisionIpamPoolCidrOutput, nil
+}
+
+func (m *mockEC2IPAMClient) GetIpamPoolAllocations(ctx context.Context, params *ec2.GetIpamPoolAllocationsInput, optFns ...func(*ec2.Options)) (*ec2.GetIpamPoolAllocationsOutput, error) {
+	return &m.GetIpamPoolAllocationsOutput, nil
+}
+
+func (m *mockEC2IPAMClient) ReleaseIpamPoolAllocation(ctx context.Context, params *ec2.ReleaseIpamPoolAllocationInput, optFns ...func(*ec2.Options)) (*ec2.ReleaseIpamPoolAllocationOutput, error) {
+	return &m.ReleaseIpamPoolAllocationOutput, nil
+}
+
+func (m *mockEC2IPAMClient) DescribeIpamScopes(ctx context.Context, params *ec2.DescribeIpamScopesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeIpamScopesOutput, error) {
+	return &m.DescribeIpamScopesOutput, nil
+}
+
+func (m *mockEC2IPAMClient) DescribeIpamPools(ctx context.Context, params *ec2.DescribeIpamPoolsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeIpamPoolsOutput, error) {
+	return &m.DescribeIpamPoolsOutput, nil
+}
+
+func (m *mockEC2IPAMClient) DeleteIpamPool(ctx context.Context, params *ec2.DeleteIpamPoolInput, optFns ...func(*ec2.Options)) (*ec2.DeleteIpamPoolOutput, error) {
+	return &m.DeleteIpamPoolOutput, nil
+}
+
+func TestListEC2IPAMs(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	testId1 := "ipam-0dfc56f901b2c3462"
+	testId2 := "ipam-0dfc56f901b2c3463"
+	testName1 := "test-ipam-id1"
+	testName2 := "test-ipam-id2"
+
+	mock := &mockEC2IPAMClient{
+		DescribeIpamsOutput: ec2.DescribeIpamsOutput{
+			Ipams: []types.Ipam{
+				{
+					IpamId: &testId1,
+					Tags: []types.Tag{
+						{Key: aws.String("Name"), Value: aws.String(testName1)},
+						{Key: aws.String(util.FirstSeenTagKey), Value: aws.String(util.FormatTimestamp(now))},
+					},
+				},
+				{
+					IpamId: &testId2,
+					Tags: []types.Tag{
+						{Key: aws.String("Name"), Value: aws.String(testName2)},
+						{Key: aws.String(util.FirstSeenTagKey), Value: aws.String(util.FormatTimestamp(now))},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), util.ExcludeFirstSeenTagKey, false)
+
+	tests := map[string]struct {
+		cfg      config.ResourceType
+		expected []string
+	}{
+		"emptyFilter": {
+			cfg:      config.ResourceType{},
+			expected: []string{testId1, testId2},
+		},
+		"nameExclusionFilter": {
+			cfg: config.ResourceType{
+				ExcludeRule: config.FilterRule{
+					NamesRegExp: []config.Expression{{RE: *regexp.MustCompile(testName1)}},
+				},
+			},
+			expected: []string{testId2},
+		},
+		"timeAfterExclusionFilter": {
+			cfg: config.ResourceType{
+				ExcludeRule: config.FilterRule{
+					TimeAfter: aws.Time(now.Add(-1 * time.Hour)),
+				},
+			},
+			expected: []string{},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			ids, err := listEC2IPAMs(ctx, mock, resource.Scope{}, tc.cfg)
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, aws.ToStringSlice(ids))
+		})
+	}
+}
+
+func TestNukeEC2IPAM_NilPublicDefaultScopeId(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockEC2IPAMClient{
+		DescribeIpamsOutput: ec2.DescribeIpamsOutput{
+			Ipams: []types.Ipam{
+				{
+					IpamId:               aws.String("ipam-test"),
+					PublicDefaultScopeId: nil, // nil scope ID should be handled gracefully
+				},
+			},
+		},
+	}
+
+	err := nukeEC2IPAM(context.Background(), mock, aws.String("ipam-test"))
+	require.NoError(t, err)
+}
+
+func TestNukeEC2IPAM(t *testing.T) {
+	t.Parallel()
+
+	publicScope := "ipam-scope-001277b300c015f14"
+	publicScopeARN := "arn:aws:ec2::499213733106:ipam-scope/ipam-scope-001277b300c015f14"
+
+	mock := &mockEC2IPAMClient{
+		DescribeIpamsOutput: ec2.DescribeIpamsOutput{
+			Ipams: []types.Ipam{
+				{
+					IpamId:               aws.String("ipam-test"),
+					PublicDefaultScopeId: aws.String(publicScope),
+				},
+			},
+		},
+		DescribeIpamScopesOutput: ec2.DescribeIpamScopesOutput{
+			IpamScopes: []types.IpamScope{
+				{
+					IpamScopeId:  aws.String(publicScope),
+					IpamScopeArn: aws.String(publicScopeARN),
+				},
+			},
+		},
+		DescribeIpamPoolsOutput: ec2.DescribeIpamPoolsOutput{
+			IpamPools: []types.IpamPool{
+				{IpamPoolId: aws.String("ipam-pool-001")},
+			},
+		},
+		GetIpamPoolCidrsOutput: ec2.GetIpamPoolCidrsOutput{
+			IpamPoolCidrs: []types.IpamPoolCidr{
+				{Cidr: aws.String("10.0.0.0/24")},
+			},
+		},
+		GetIpamPoolAllocationsOutput: ec2.GetIpamPoolAllocationsOutput{
+			IpamPoolAllocations: []types.IpamPoolAllocation{
+				{
+					ResourceType:         types.IpamPoolAllocationResourceTypeCustom,
+					IpamPoolAllocationId: aws.String("ipam-pool-alloc-001"),
+					Cidr:                 aws.String("10.0.0.0/28"),
+				},
+			},
+		},
+	}
+
+	err := nukeEC2IPAM(context.Background(), mock, aws.String("ipam-test"))
+	require.NoError(t, err)
+}

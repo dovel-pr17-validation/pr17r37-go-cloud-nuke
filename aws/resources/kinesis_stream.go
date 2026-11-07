@@ -1,0 +1,79 @@
+package resources
+
+import (
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/gruntwork-io/cloud-nuke/config"
+	"github.com/gruntwork-io/cloud-nuke/logging"
+	"github.com/gruntwork-io/cloud-nuke/resource"
+	"github.com/gruntwork-io/cloud-nuke/util"
+)
+
+// KinesisStreamsAPI defines the interface for Kinesis Streams operations.
+type KinesisStreamsAPI interface {
+	ListStreams(ctx context.Context, params *kinesis.ListStreamsInput, optFns ...func(*kinesis.Options)) (*kinesis.ListStreamsOutput, error)
+	DeleteStream(ctx context.Context, params *kinesis.DeleteStreamInput, optFns ...func(*kinesis.Options)) (*kinesis.DeleteStreamOutput, error)
+	ListTagsForStream(ctx context.Context, params *kinesis.ListTagsForStreamInput, optFns ...func(*kinesis.Options)) (*kinesis.ListTagsForStreamOutput, error)
+}
+
+// NewKinesisStreams creates a new Kinesis Streams resource using the generic resource pattern.
+func NewKinesisStreams() AwsResource {
+	return NewAwsResource(&resource.Resource[KinesisStreamsAPI]{
+		ResourceTypeName: "kinesis-stream",
+		// Conservative batch size to avoid AWS API rate limiting for sequential delete calls.
+		BatchSize: 35,
+		InitClient: WrapAwsInitClient(func(r *resource.Resource[KinesisStreamsAPI], cfg aws.Config) {
+			r.Scope.Region = cfg.Region
+			r.Client = kinesis.NewFromConfig(cfg)
+		}),
+		ConfigGetter: func(c config.Config) config.ResourceType {
+			return c.KinesisStream
+		},
+		Lister: listKinesisStreams,
+		Nuker:  resource.SimpleBatchDeleter(deleteKinesisStream),
+	})
+}
+
+// listKinesisStreams retrieves all Kinesis streams that match the config filters.
+func listKinesisStreams(ctx context.Context, client KinesisStreamsAPI, scope resource.Scope, cfg config.ResourceType) ([]*string, error) {
+	var allStreams []*string
+
+	paginator := kinesis.NewListStreamsPaginator(client, &kinesis.ListStreamsInput{})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, stream := range page.StreamNames {
+			tagsOutput, err := client.ListTagsForStream(ctx, &kinesis.ListTagsForStreamInput{
+				StreamName: aws.String(stream),
+			})
+			if err != nil {
+				logging.Debugf("[Failed] Unable to fetch tags for Kinesis stream %s: %s", stream, err)
+				continue
+			}
+
+			if cfg.ShouldInclude(config.ResourceValue{
+				Name: aws.String(stream),
+				Tags: util.ConvertKinesisTagsToMap(tagsOutput.Tags),
+			}) {
+				allStreams = append(allStreams, aws.String(stream))
+			}
+		}
+	}
+
+	return allStreams, nil
+}
+
+// deleteKinesisStream deletes a single Kinesis stream.
+// EnforceConsumerDeletion is set to true to delete streams even if they have registered consumers.
+func deleteKinesisStream(ctx context.Context, client KinesisStreamsAPI, streamName *string) error {
+	_, err := client.DeleteStream(ctx, &kinesis.DeleteStreamInput{
+		StreamName:              streamName,
+		EnforceConsumerDeletion: aws.Bool(true),
+	})
+	return err
+}

@@ -1,0 +1,75 @@
+version: "2"
+
+run:
+  timeout: 10m
+  tests: true
+  modules-download-mode: readonly
+  go: "1.24"
+
+linters:
+  enable:
+    # Default linters
+    - errcheck      # Checking for unchecked errors
+    - govet         # Reports suspicious constructs
+    - ineffassign   # Detects unused assignments
+    - staticcheck   # Comprehensive static analysis
+    - unused        # Checks for unused code
+
+    # Code quality linters
+    - bodyclose     # Checks HTTP response body is closed
+    - durationcheck # Check time.Duration issues
+    - errorlint     # Error handling problems
+    - copyloopvar   # Checks loop variable captures
+    - noctx         # HTTP requests without context
+    - nilerr        # Returns nil even when error is not nil
+
+    # Style linters
+    - misspell      # Finds misspelled words
+    - whitespace    # Leading/trailing whitespace
+
+  disable:
+    - depguard
+    - exhaustive
+    - gochecknoglobals
+    - lll
+    - wsl
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+
+  govet:
+    enable:
+      - shadow
+
+  staticcheck:
+    checks: ["all", "-ST1000", "-ST1003", "-QF1008", "-SA1029", "-SA9003"]
+
+issues:
+  new: true
+
+  exclude-dirs:
+    - vendor
+    - third_party
+    - generated
+
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - noctx
+        - staticcheck
+
+    - path: "generated"
+      linters:
+        - staticcheck
+        - govet
+
+  max-issues-per-linter: 0
+  max-same-issues: 0

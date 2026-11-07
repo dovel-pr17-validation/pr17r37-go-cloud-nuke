@@ -1,0 +1,156 @@
+package resources
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
+	"github.com/gruntwork-io/cloud-nuke/config"
+	"github.com/gruntwork-io/cloud-nuke/resource"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type mockCloudWatchLogGroupsClient struct {
+	DescribeLogGroupsOutput cloudwatchlogs.DescribeLogGroupsOutput
+	DeleteLogGroupOutput    cloudwatchlogs.DeleteLogGroupOutput
+}
+
+func (m *mockCloudWatchLogGroupsClient) DescribeLogGroups(ctx context.Context, params *cloudwatchlogs.DescribeLogGroupsInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DescribeLogGroupsOutput, error) {
+	return &m.DescribeLogGroupsOutput, nil
+}
+
+func (m *mockCloudWatchLogGroupsClient) DeleteLogGroup(ctx context.Context, params *cloudwatchlogs.DeleteLogGroupInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.DeleteLogGroupOutput, error) {
+	return &m.DeleteLogGroupOutput, nil
+}
+
+func (m *mockCloudWatchLogGroupsClient) ListTagsForResource(ctx context.Context, params *cloudwatchlogs.ListTagsForResourceInput, optFns ...func(*cloudwatchlogs.Options)) (*cloudwatchlogs.ListTagsForResourceOutput, error) {
+	arn := aws.ToString(params.ResourceArn)
+	// A trailing ":*" means the caller failed to normalize the ARN; mimic the real API,
+	// which rejects that form with "Invalid resourceArn" (the root cause of issue #1150).
+	if strings.HasSuffix(arn, ":*") {
+		return nil, fmt.Errorf("ValidationException: Invalid resourceArn: %s", arn)
+	}
+	if strings.HasSuffix(arn, "tag-error") {
+		return nil, fmt.Errorf("ServiceUnavailableException")
+	}
+	if arn == "arn:aws:logs:us-east-1:123456789:log-group:log-group-2" {
+		return &cloudwatchlogs.ListTagsForResourceOutput{Tags: map[string]string{"env": "prod"}}, nil
+	}
+	return &cloudwatchlogs.ListTagsForResourceOutput{Tags: map[string]string{"env": "dev"}}, nil
+}
+
+func TestCloudWatchLogGroups_ResourceName(t *testing.T) {
+	r := NewCloudWatchLogGroups()
+	assert.Equal(t, "cloudwatch-loggroup", r.ResourceName())
+}
+
+func TestCloudWatchLogGroups_MaxBatchSize(t *testing.T) {
+	r := NewCloudWatchLogGroups()
+	assert.Equal(t, 35, r.MaxBatchSize())
+}
+
+func TestListCloudWatchLogGroups(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UnixMilli()
+	mock := &mockCloudWatchLogGroupsClient{
+		DescribeLogGroupsOutput: cloudwatchlogs.DescribeLogGroupsOutput{
+			LogGroups: []types.LogGroup{
+				{LogGroupName: aws.String("log-group-1"), CreationTime: aws.Int64(now)},
+				{LogGroupName: aws.String("log-group-2"), CreationTime: aws.Int64(now)},
+			},
+		},
+	}
+
+	names, err := listCloudWatchLogGroups(context.Background(), mock, resource.Scope{}, config.ResourceType{})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"log-group-1", "log-group-2"}, aws.ToStringSlice(names))
+}
+
+func TestListCloudWatchLogGroups_WithFilter(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UnixMilli()
+	mock := &mockCloudWatchLogGroupsClient{
+		DescribeLogGroupsOutput: cloudwatchlogs.DescribeLogGroupsOutput{
+			LogGroups: []types.LogGroup{
+				{LogGroupName: aws.String("log-group-1"), CreationTime: aws.Int64(now)},
+				{LogGroupName: aws.String("skip-this"), CreationTime: aws.Int64(now)},
+			},
+		},
+	}
+
+	cfg := config.ResourceType{
+		ExcludeRule: config.FilterRule{
+			NamesRegExp: []config.Expression{{RE: *regexp.MustCompile("skip-.*")}},
+		},
+	}
+
+	names, err := listCloudWatchLogGroups(context.Background(), mock, resource.Scope{}, cfg)
+	require.NoError(t, err)
+	require.Equal(t, []string{"log-group-1"}, aws.ToStringSlice(names))
+}
+
+func TestListCloudWatchLogGroups_TagInclusionFilter(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UnixMilli()
+	mock := &mockCloudWatchLogGroupsClient{
+		DescribeLogGroupsOutput: cloudwatchlogs.DescribeLogGroupsOutput{
+			LogGroups: []types.LogGroup{
+				// log-group-1 exercises the LogGroupArn path (suffix-free, as DescribeLogGroups
+				// returns it). log-group-2 omits LogGroupArn to exercise the Arn fallback, whose
+				// trailing ":*" must be stripped before ListTagsForResource (see issue #1150).
+				{LogGroupName: aws.String("log-group-1"), LogGroupArn: aws.String("arn:aws:logs:us-east-1:123456789:log-group:log-group-1"), Arn: aws.String("arn:aws:logs:us-east-1:123456789:log-group:log-group-1:*"), CreationTime: aws.Int64(now)},
+				{LogGroupName: aws.String("log-group-2"), Arn: aws.String("arn:aws:logs:us-east-1:123456789:log-group:log-group-2:*"), CreationTime: aws.Int64(now)},
+			},
+		},
+	}
+
+	cfg := config.ResourceType{
+		IncludeRule: config.FilterRule{
+			Tags: map[string]config.Expression{
+				"env": {RE: *regexp.MustCompile("^prod$")},
+			},
+		},
+	}
+
+	names, err := listCloudWatchLogGroups(context.Background(), mock, resource.Scope{}, cfg)
+	require.NoError(t, err)
+	require.Equal(t, []string{"log-group-2"}, aws.ToStringSlice(names))
+}
+
+func TestListCloudWatchLogGroups_SkipsOnTagListError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UnixMilli()
+	mock := &mockCloudWatchLogGroupsClient{
+		DescribeLogGroupsOutput: cloudwatchlogs.DescribeLogGroupsOutput{
+			LogGroups: []types.LogGroup{
+				{LogGroupName: aws.String("log-group-ok"), LogGroupArn: aws.String("arn:aws:logs:us-east-1:123456789:log-group:log-group-ok"), CreationTime: aws.Int64(now)},
+				{LogGroupName: aws.String("log-group-tag-error"), LogGroupArn: aws.String("arn:aws:logs:us-east-1:123456789:log-group:log-group-tag-error"), CreationTime: aws.Int64(now)},
+			},
+		},
+	}
+
+	// A log group whose tags cannot be read is skipped rather than nuked, since it may
+	// carry an exclude tag we could not observe.
+	names, err := listCloudWatchLogGroups(context.Background(), mock, resource.Scope{}, config.ResourceType{})
+	require.NoError(t, err)
+	require.Equal(t, []string{"log-group-ok"}, aws.ToStringSlice(names))
+}
+
+func TestDeleteCloudWatchLogGroup(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockCloudWatchLogGroupsClient{}
+	err := deleteCloudWatchLogGroup(context.Background(), mock, aws.String("test-log-group"))
+	require.NoError(t, err)
+}
